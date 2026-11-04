@@ -1,0 +1,12 @@
+{
+  "botName": "Kazi-md-bot-4X",
+  "version": "6.0.0",
+  "prefixes": [".", "!", "/", "#"],
+  "ownerNumber": "8801736596896",
+  "telegramToken": "এখানে_টেলিগ্রাম_বট_টোকেন_বসান",
+  "telegramChannel": "https://t.me/+YwJa5OU_Mn5kY2Q9",
+  "waChannelLink": "",
+  "newsletterJid": "120363426421968955@newsletter",
+  "newsletterName": "Kazi-md-bot-4X",
+  "menuImage": ""
+}
