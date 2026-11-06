@@ -1,0 +1,13 @@
+{
+  "name": "kazi-md-bot-4x",
+  "version": "6.0.0",
+  "type": "module",
+  "scripts": { "start": "node --max-old-space-size=220 index.js" },
+  "dependencies": {
+    "@distube/ytdl-core": "^4.14.4",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "node-telegram-bot-api": "^0.66.0",
+    "pino": "^9.0.0",
+    "yt-search": "^2.12.1"
+  }
+}
