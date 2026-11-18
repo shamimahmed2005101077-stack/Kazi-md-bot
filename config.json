@@ -9,5 +9,7 @@
   "waChannelLink": "",
   "newsletterJid": "120363426421968955@newsletter",
   "newsletterName": "Kazi-md-bot-4X",
-  "menuImage": "https://i.postimg.cc/BQC0GTLH/thumb.png"
+  "menuImage": "https://i.postimg.cc/BQC0GTLH/thumb.png",
+  "geminiKey": "",
+"geminiModel": "gemini-2.5-flash"
 }
