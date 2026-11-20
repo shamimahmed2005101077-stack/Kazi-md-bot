@@ -1,0 +1,186 @@
+import fs from 'fs'
+import path from 'path'
+import pino from 'pino'
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  Browsers,
+  makeCacheableSignalKeyStore
+} from '@whiskeysockets/baileys'
+import { handleMessage } from './handler.js'
+import { handleGroupEvent } from './events.js'
+
+const logger = pino({ level: 'silent' })
+
+const sessions = new Map()
+const starting = new Set()
+const reconnectTimers = new Map()
+const retryCount = new Map()
+
+let cachedVersion = null
+
+async function getWAVersion() {
+  if (cachedVersion) return cachedVersion
+  try {
+    const { version } = await fetchLatestBaileysVersion()
+    if (Array.isArray(version)) cachedVersion = version
+    return version
+  } catch {
+    return undefined
+  }
+}
+
+export const hasSession = n =>
+  sessions.has(n) || starting.has(n) || reconnectTimers.has(n)
+
+export async function startSession(number, notify = {}) {
+  if (starting.has(number) || sessions.has(number)) return
+
+  if (reconnectTimers.has(number)) {
+    clearTimeout(reconnectTimers.get(number))
+    reconnectTimers.delete(number)
+  }
+
+  starting.add(number)
+  const dir = path.join('sessions', number)
+
+  let sock
+  let pairingTimer = null
+
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(dir)
+
+    if (!state.creds.registered && !notify.onCode && !notify.isReconnect) {
+      fs.rmSync(dir, { recursive: true, force: true })
+      return
+    }
+
+    const version = await getWAVersion()
+
+    sock = makeWASocket({
+      ...(version ? { version } : {}),
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger)
+      },
+      logger,
+      browser: Browsers.ubuntu('Chrome'),
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      shouldSyncHistoryMessage: () => false,
+      generateHighQualityLinkPreview: false,
+      connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 30000,
+      defaultQueryTimeoutMs: 60000,
+      retryRequestDelayMs: 2000
+    })
+
+    sessions.set(number, sock)
+
+    let opened = false
+    let credChain = Promise.resolve()
+
+    sock.ev.on('creds.update', () => {
+      credChain = credChain.then(() => saveCreds()).catch(() => {})
+    })
+
+    if (!state.creds.registered) {
+      pairingTimer = setTimeout(async () => {
+        if (sessions.get(number) !== sock) return
+        try {
+          const raw = await sock.requestPairingCode(number)
+          notify.onCode?.(raw.match(/.{1,4}/g).join('-'))
+        } catch (e) {
+          console.log(`pairing error (${number}):`, e.message)
+          notify.onError?.(e)
+          if (sessions.get(number) === sock) sessions.delete(number)
+          fs.rmSync(dir, { recursive: true, force: true })
+          try { sock.end(undefined) } catch {}
+        }
+      }, 3000)
+    }
+
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+      if (connection === 'open') {
+        if (pairingTimer) {
+          clearTimeout(pairingTimer)
+          pairingTimer = null
+        }
+        retryCount.delete(number)
+        console.log(`✅ ${number} connected`)
+        if (!opened) {
+          opened = true
+          notify.onOpen?.(sock.user?.id)
+        }
+      }
+
+      if (connection === 'close') {
+        if (pairingTimer) {
+          clearTimeout(pairingTimer)
+          pairingTimer = null
+        }
+
+        if (sessions.get(number) !== sock) return
+        sessions.delete(number)
+
+        await credChain
+
+        const err = lastDisconnect?.error
+        const code = err?.output?.statusCode
+        console.log(`🔄 ${number} closed (code ${code ?? 'unknown'}): ${err?.message || ''}`)
+
+        if (
+          code === DisconnectReason.loggedOut ||
+          code === DisconnectReason.forbidden ||
+          code === 401 ||
+          code === 403
+        ) {
+          retryCount.delete(number)
+          fs.rmSync(dir, { recursive: true, force: true })
+          return
+        }
+
+        if (code === DisconnectReason.connectionReplaced || code === 440) {
+          retryCount.delete(number)
+          console.log(`⚠️ ${number} replaced by another session`)
+          return
+        }
+
+        const attempt = (retryCount.get(number) || 0) + 1
+        retryCount.set(number, attempt)
+
+        const delay =
+          code === DisconnectReason.restartRequired || code === 515
+            ? 1500
+            : Math.min(30000, 3000 * attempt)
+
+        const timer = setTimeout(() => {
+          reconnectTimers.delete(number)
+          startSession(
+            number,
+            opened ? { isReconnect: true } : { onOpen: notify.onOpen, isReconnect: true }
+          ).catch(console.error)
+        }, delay)
+
+        reconnectTimers.set(number, timer)
+      }
+    })
+
+    sock.ev.on('messages.upsert', ({ messages, type }) => {
+      if (type !== 'notify') return
+      for (const m of messages) {
+        handleMessage(sock, m).catch(e => console.log('handler error:', e.message))
+      }
+    })
+
+    sock.ev.on('group-participants.update', ev =>
+      handleGroupEvent(sock, ev).catch(e => console.log('group event error:', e.message))
+    )
+  } catch (e) {
+    console.log(`❌ ${number} start error:`, e.message)
+    notify.onError?.(e)
+  } finally {
+    starting.delete(number)
+  }
+}
